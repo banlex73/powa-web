@@ -42,6 +42,9 @@ class QualConstantsMetricGroup(MetricGroupDef):
                 .column(totals.c.occurences.label('total_occurences'))
                 .correlate(query))
 
+    def add_params(self, params):
+        params['queryids'] = [int(params['query'])]
+        return params
 
     def post_process(self, data, server, database, query, qual, **kwargs):
         if not data['data']:
@@ -83,19 +86,23 @@ class QualDetail(ContentWidget):
                     "query": query,
                     "from": self.get_argument("from"),
                     "to": self.get_argument("to"),
+                    "queryids": [query],
                     "qualid": qual}))
 
         my_qual = None
         other_queries = {}
 
+        other_queries = {r['queryid']: r['query'] for r in self.execute(text("""
+            SELECT DISTINCT queryid, query
+            FROM powa_qualstats_quals
+            JOIN powa_statements USING (queryid)
+            WHERE qualid = :qual
+            LIMIT 5"""), {"qual": qual})}
         for qual in quals:
             if qual['is_my_query']:
                 my_qual = resolve_quals(self.connect(server,
                                         database=database),
                                         [qual])[0]
-            else:
-                other_queries[qual['queryid']] = qual['query']
-
         if my_qual is None:
             self.render("xhr.html", content="No data")
             return
