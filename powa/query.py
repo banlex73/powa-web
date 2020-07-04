@@ -41,9 +41,11 @@ class QueryOverviewMetricGroup(MetricGroupDef):
     xaxis = "ts"
     data_url = r"/server/(\d+)/metrics/database/([^\/]+)/query/(-?\d+)"
     rows = MetricDef(label="#Rows",
-                     desc="Sum of the number of rows returned by the query")
+                     desc="Sum of the number of rows returned by the query"
+                          " per second")
     calls = MetricDef(label="#Calls",
-                      desc="Number of time the query has been executed")
+                      desc="Number of time the query has been executed"
+                           " per second")
     shared_blks_read = MetricDef(label="Shared read", type="sizerate",
                                  desc="Amount of data found in OS cache or"
                                       " read from disk")
@@ -137,17 +139,23 @@ class QueryOverviewMetricGroup(MetricGroupDef):
             (column("queryid") == bindparam("query")))
         query = query.alias()
         c = query.c
-        total_blocks = ((c.shared_blks_read + c.shared_blks_hit)
+        total_blocks = ((sum(c.shared_blks_read) + sum(c.shared_blks_hit))
                         .label("total_blocks"))
 
+        def get_ts():
+            return extract("epoch", greatest(c.mesure_interval, '1 second'))
+
+        def sumps(col):
+            return (sum(col) / get_ts()).label(col.name)
+
         def bps(col):
-            ts = extract("epoch", greatest(c.mesure_interval, '1 second'))
-            return (mulblock(col) / ts).label(col.name)
+            return (mulblock(sum(col)) / get_ts()).label(col.name)
+
         cols = [to_epoch(c.ts),
-                c.rows,
-                c.calls,
+                sumps(c.rows),
+                sumps(c.calls),
                 case([(total_blocks == 0, 0)],
-                     else_=cast(c.shared_blks_hit, Numeric) * 100 /
+                     else_=cast(sum(c.shared_blks_hit), Numeric) * 100 /
                      total_blocks).label("hit_ratio"),
                 bps(c.shared_blks_read),
                 bps(c.shared_blks_hit),
@@ -159,13 +167,9 @@ class QueryOverviewMetricGroup(MetricGroupDef):
                 bps(c.local_blks_written),
                 bps(c.temp_blks_read),
                 bps(c.temp_blks_written),
-                (c.blk_read_time /
-                 extract("epoch", greatest(c.mesure_interval, '1 second'))
-                 ).label("blk_read_time"),
-                (c.blk_write_time /
-                 extract("epoch", greatest(c.mesure_interval, '1 second'))
-                 ).label("blk_write_time"),
-                (c.runtime / greatest(c.calls, 1)).label("avg_runtime")]
+                sumps(c.blk_read_time),
+                sumps(c.blk_write_time),
+                (sum(c.runtime) / greatest(sum(c.calls), 1)).label("avg_runtime")]
 
         from_clause = query
         if self.has_extension(self.path_args[0], "pg_stat_kcache"):
@@ -182,14 +186,14 @@ class QueryOverviewMetricGroup(MetricGroupDef):
                     )
                 .alias())
             kc = kcache_query.c
-            sys_hits = (greatest(mulblock(c.shared_blks_read) -
-                                 kc.reads, 0)
+            sys_hits = (greatest(mulblock(sum(c.shared_blks_read)) -
+                                 sum(kc.reads), 0)
                         .label("kcache_hitblocks"))
             sys_hitratio = (cast(sys_hits, Numeric) * 100 /
                             mulblock(total_blocks))
-            disk_hit_ratio = (kc.reads * 100 /
+            disk_hit_ratio = (sum(kc.reads) * 100 /
                               mulblock(total_blocks))
-            total_time = greatest(c.runtime, 1);
+            total_time = greatest(sum(c.runtime), 1)
             # Rusage can return values > real time due to sampling bias
             # aligned to kernel ticks. As such, we have to clamp values to 100%
             total_time_percent = lambda x: least(100, (x * 100) /
@@ -197,7 +201,7 @@ class QueryOverviewMetricGroup(MetricGroupDef):
 
             def per_sec(col):
                 ts = extract("epoch", greatest(c.mesure_interval, '1 second'))
-                return (col / ts).label(col.name)
+                return (sum(col) / ts).label(col.name)
             cols.extend([
                 per_sec(kc.reads),
                 per_sec(kc.writes),
@@ -209,10 +213,10 @@ class QueryOverviewMetricGroup(MetricGroupDef):
                 # per_sec(kc.nsignals),
                 per_sec(kc.nvcsws),
                 per_sec(kc.nivcsws),
-                total_time_percent(kc.user_time * 1000).label("user_time"),
-                total_time_percent(kc.system_time * 1000).label("system_time"),
+                total_time_percent(sum(kc.user_time) * 1000).label("user_time"),
+                total_time_percent(sum(kc.system_time) * 1000).label("system_time"),
                 greatest(total_time_percent(
-                    c.runtime - ((kc.user_time + kc.system_time) *
+                    sum(c.runtime) - ((sum(kc.user_time) + sum(kc.system_time)) *
                     1000)), 0).label("other_time"),
                 case([(total_blocks == 0, 0)],
                      else_=disk_hit_ratio).label("disk_hit_ratio"),
@@ -220,17 +224,21 @@ class QueryOverviewMetricGroup(MetricGroupDef):
                      else_=sys_hitratio).label("sys_hit_ratio")])
             from_clause = from_clause.join(
                 kcache_query,
-                kcache_query.c.ts == c.ts)
+                and_(kcache_query.c.ts == c.ts,
+                     kcache_query.c.queryid == c.queryid,
+                     kcache_query.c.userid == c.userid,
+                     kcache_query.c.dbid == c.dbid))
         else:
             cols.extend([
                 case([(total_blocks == 0, 0)],
-                     else_=cast(c.shared_blks_read, Numeric) * 100 /
+                     else_=cast(sum(c.shared_blks_read), Numeric) * 100 /
                      total_blocks).label("miss_ratio")
             ])
 
         return (select(cols)
                 .select_from(from_clause)
                 .where(c.calls != None)
+                .group_by(c.ts, block_size.c.block_size, c.mesure_interval)
                 .order_by(c.ts)
                 .params(samples=100))
 
@@ -246,6 +254,15 @@ class QueryIndexes(ContentWidget):
     def get(self, srvid, database, query):
         if not self.has_extension(srvid, "pg_qualstats"):
             raise HTTPError(501, "PG qualstats is not installed")
+
+        try:
+            # Check remote access first
+            remote_conn = self.connect(srvid, database=database,
+                                       remote_access=True)
+        except Exception as e:
+            raise HTTPError(501, "Could not connect to remote server: %s" %
+                                 str(e))
+
         base_query = qualstat_getstatdata(srvid)
         c = inner_cc(base_query)
         base_query.append_from(text("""LATERAL unnest(quals) as qual"""))
@@ -259,7 +276,7 @@ class QueryIndexes(ContentWidget):
                                  'to': 'infinity'}))
         optimizable = list(self.execute(base_query, params={'server': srvid,
                                                             'query': query}))
-        optimizable = resolve_quals(self.connect(srvid, database=database),
+        optimizable = resolve_quals(remote_conn,
                                     optimizable,
                                     'quals')
         hypoplan = None
@@ -278,7 +295,8 @@ class QueryIndexes(ContentWidget):
                 if ddl is not None:
                     try:
                         ind.name = self.execute(ddl, srvid=srvid,
-                                                database=database).scalar()
+                                                database=database,
+                                                remote_access=True).scalar()
                     except DBAPIError as e:
                         self.flash("Could not create hypothetical index: %s" %
                                    str(e.orig.diag.message_primary))
@@ -287,8 +305,7 @@ class QueryIndexes(ContentWidget):
                                             self.get_argument("from"),
                                             self.get_argument("to"))
             try:
-                hypoplan = get_hypoplans(self.connect(srvid,
-                                                      database=database),
+                hypoplan = get_hypoplans(remote_conn,
                                          querystr, allindexes)
             except DBAPIError as e:
                 # TODO: offer the possibility to fill in parameters from the UI
@@ -325,9 +342,10 @@ class QueryExplains(ContentWidget):
                     sqlQuery = text("EXPLAIN %s" % query)
                     result = self.execute(sqlQuery,
                                           srvid=server,
-                                          database=database)
+                                          database=database,
+                                          remote_access=True)
                     plan = "\n".join(v[0] for v in result)
-                except:
+                except Exception:
                     pass
                 plans.append(Plan(key, vals['constants'], query,
                                   plan, vals["filter_ratio"],
@@ -449,7 +467,8 @@ class WaitSamplingList(MetricGroupDef):
                    sum(c.count).label("counts")]
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid   == c.dbid) &
+                                       (ps.c.srvid  == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where((c.datname == bindparam("database")) &
@@ -480,11 +499,17 @@ class QualList(MetricGroupDef):
         return (base.where(c.queryid == bindparam("query")))
 
     def post_process(self, data, server, database, query, **kwargs):
-        conn = self.connect(server, database=database)
-        data["data"] = resolve_quals(conn, data["data"])
+        try:
+            remote_conn = self.connect(server, database=database,
+                                       remote_access=True)
+        except Exception as e:
+            raise HTTPError(501, "Could not connect to remote server: %s" %
+                                 str(e))
+
+        data["data"] = resolve_quals(remote_conn, data["data"])
         for qual in data["data"]:
-            qual.url = self.reverse_url('QualOverview', server, database, query,
-                                        qual.qualid)
+            qual.url = self.reverse_url('QualOverview', server, database,
+                                        query, qual.qualid)
         return data
 
 
@@ -503,9 +528,10 @@ class QueryDetail(ContentWidget):
             (column("queryid") == bindparam("query")))
         stmt = stmt.alias()
         from_clause = outerjoin(powa_statements, stmt,
-                                and_(powa_statements.c.queryid ==
-                                     stmt.c.queryid, powa_statements.c.dbid ==
-                                     stmt.c.dbid))
+                                and_(powa_statements.c.queryid == stmt.c.queryid,
+                                     powa_statements.c.dbid == stmt.c.dbid,
+                                     powa_statements.c.userid == stmt.c.userid,
+                                     powa_statements.c.srvid == srvid))
         c = stmt.c
         rblk = mulblock(sum(c.shared_blks_read).label("shared_blks_read"))
         wblk = mulblock(sum(c.shared_blks_hit).label("shared_blks_hit"))
@@ -517,7 +543,9 @@ class QueryDetail(ContentWidget):
             wblk,
             (rblk + wblk).label("total_blks")])
             .select_from(from_clause)
-            .where(powa_statements.c.queryid == bindparam("query"))
+            .where((powa_statements.c.dbid == stmt.c.dbid) &
+             (powa_statements.c.srvid == srvid) &
+             (powa_statements.c.queryid == query))
             .group_by(column("query"), bs))
 
         value = self.execute(stmt, params={
