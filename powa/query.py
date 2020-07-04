@@ -237,7 +237,7 @@ class QueryOverviewMetricGroup(MetricGroupDef):
 
         return (select(cols)
                 .select_from(from_clause)
-                .where(c.calls != '0')
+                .where(c.calls != None)
                 .group_by(c.ts, block_size.c.block_size, c.mesure_interval)
                 .order_by(c.ts)
                 .params(samples=100))
@@ -467,7 +467,8 @@ class WaitSamplingList(MetricGroupDef):
                    sum(c.count).label("counts")]
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid   == c.dbid) &
+                                       (ps.c.srvid  == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where((c.datname == bindparam("database")) &
@@ -529,7 +530,8 @@ class QueryDetail(ContentWidget):
         from_clause = outerjoin(powa_statements, stmt,
                                 and_(powa_statements.c.queryid == stmt.c.queryid,
                                      powa_statements.c.dbid == stmt.c.dbid,
-                                     powa_statements.c.userid == stmt.c.userid))
+                                     powa_statements.c.userid == stmt.c.userid,
+                                     powa_statements.c.srvid == srvid))
         c = stmt.c
         rblk = mulblock(sum(c.shared_blks_read).label("shared_blks_read"))
         wblk = mulblock(sum(c.shared_blks_hit).label("shared_blks_hit"))
@@ -541,7 +543,9 @@ class QueryDetail(ContentWidget):
             wblk,
             (rblk + wblk).label("total_blks")])
             .select_from(from_clause)
-            .where(powa_statements.c.queryid == bindparam("query"))
+            .where((powa_statements.c.dbid == stmt.c.dbid) &
+             (powa_statements.c.srvid == srvid) &
+             (powa_statements.c.queryid == query))
             .group_by(column("query"), bs))
 
         value = self.execute(stmt, params={
@@ -605,7 +609,7 @@ class QueryOverview(DashboardPage):
         iodash = Dashboard("IO",
             [[hit_ratio_graph,
               Graph("Read / Write time",
-                    url=self.docs_stats_url + "pg_stat_kcache.html",
+                    url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_stat_kcache.html",
                     metrics=[QueryOverviewMetricGroup.blk_read_time,
                              QueryOverviewMetricGroup.blk_write_time])]])
         dashes.append(iodash)
@@ -613,11 +617,11 @@ class QueryOverview(DashboardPage):
         if self.has_extension(self.path_args[0], "pg_stat_kcache"):
             iodash.widgets.extend([[
                 Graph("Physical block (in Bps)",
-                      url=self.docs_stats_url + "pg_stat_kcache.html",
+                      url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_stat_kcache.html",
                       metrics=[QueryOverviewMetricGroup.reads,
                                QueryOverviewMetricGroup.writes]),
                 Graph("CPU Time repartition",
-                      url=self.docs_stats_url + "pg_stat_kcache.html",
+                      url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_stat_kcache.html",
                       metrics=[QueryOverviewMetricGroup.user_time,
                                QueryOverviewMetricGroup.system_time,
                                QueryOverviewMetricGroup.other_time],
@@ -630,7 +634,7 @@ class QueryOverview(DashboardPage):
                 QueryOverviewMetricGroup.disk_hit_ratio)
 
             sys_graphs = [Graph("System resources (events per sec)",
-                                url=self.docs_stats_url + "pg_stat_kcache.html",
+                                url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_stat_kcache.html",
                                 metrics=[QueryOverviewMetricGroup.majflts,
                                          QueryOverviewMetricGroup.minflts,
                                          # QueryOverviewMetricGroup.nswaps,
@@ -664,10 +668,10 @@ class QueryOverview(DashboardPage):
                          WaitsQueryOverviewMetricGroup.count_io]
             dashes.append(Dashboard("Wait Events",
                 [[Graph("Wait Events (per second)",
-                        url=self.docs_stats_url + "pg_wait_sampling.html",
+                        url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_wait_sampling.html",
                         metrics=metrics),
                   Grid("Wait events summary",
-                       url=self.docs_stats_url + "pg_wait_sampling.html",
+                        url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_wait_sampling.html",
                        columns=[{
                            "name": "event_type",
                            "label": "Event Type",
