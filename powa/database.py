@@ -152,7 +152,7 @@ class DatabaseOverviewMetricGroup(MetricGroupDef):
 
         return (select(cols)
                 .select_from(from_clause)
-                .where(c.calls != '0')
+                .where(c.calls is not None)
                 .group_by(c.srvid, c.ts, bs, c.mesure_interval)
                 .order_by(c.ts)
                 .params(samples=100))
@@ -293,7 +293,6 @@ class DatabaseAllRelMetricGroup(MetricGroupDef):
         return (select(cols)
                 .select_from(from_clause)
                 .where(c.datname == bindparam("database"))
-                .where(c.mesure_interval != '0')
                 .group_by(c.srvid, c.ts, c.mesure_interval)
                 .order_by(c.ts)
                 .params(samples=100))
@@ -343,7 +342,8 @@ class ByQueryMetricGroup(MetricGroupDef):
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
                                        (ps.c.userid == c.userid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid == c.dbid)     &
+                                       (ps.c.srvid == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where(c.datname == bindparam("database"))
@@ -384,7 +384,8 @@ class ByQueryWaitSamplingMetricGroup(MetricGroupDef):
                    sum(c.count).label("counts")]
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid == c.dbid) &
+                                       (ps.c.srvid == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where(c.datname == bindparam("database"))
@@ -468,7 +469,7 @@ class DatabaseOverview(DashboardPage):
             block_graph.color_scheme = ['#cb513a', '#65b9ac', '#73c03a']
 
             sys_graphs = [Graph("System resources (events per sec)",
-                                url=self.docs_stats_url + "pg_stat_kcache.html",
+                                url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_stat_kcache.html",
                                 metrics=[DatabaseOverviewMetricGroup.majflts,
                                          DatabaseOverviewMetricGroup.minflts,
                                          # DatabaseOverviewMetricGroup.nswaps,
@@ -504,7 +505,7 @@ class DatabaseOverview(DashboardPage):
 
             graphs_dash.append(Dashboard("Wait Events",
                 [[Graph("Wait Events (per second)",
-                        url=self.docs_stats_url + "pg_wait_sampling.html",
+                        url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_wait_sampling.html",
                         metrics=metrics)]]))
 
         self._dashboard.widgets.extend(
@@ -541,7 +542,7 @@ class DatabaseOverview(DashboardPage):
         if self.has_extension(self.path_args[0], "pg_wait_sampling"):
             self._dashboard.widgets.extend([[
                 Grid("Wait events for all queries",
-                     url=self.docs_stats_url + "pg_wait_sampling.html",
+                     url="https://powa.readthedocs.io/en/latest/stats_extensions/pg_wait_sampling.html",
                      columns=[{
                        "name": "query",
                        "label": "Query",
