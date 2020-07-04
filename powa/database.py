@@ -264,7 +264,7 @@ class DatabaseAllRelMetricGroup(MetricGroupDef):
 
     @property
     def query(self):
-        query = powa_get_all_tbl_sample(bindparam("server"))
+        query = powa_get_all_tbl_sample("db", bindparam("server"))
         query = query.alias()
         c = query.c
 
@@ -342,7 +342,8 @@ class ByQueryMetricGroup(MetricGroupDef):
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
                                        (ps.c.userid == c.userid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid == c.dbid)     &
+                                       (ps.c.srvid == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where(c.datname == bindparam("database"))
@@ -383,7 +384,8 @@ class ByQueryWaitSamplingMetricGroup(MetricGroupDef):
                    sum(c.count).label("counts")]
         from_clause = inner_query.join(ps,
                                        (ps.c.queryid == c.queryid) &
-                                       (ps.c.dbid == c.dbid))
+                                       (ps.c.dbid == c.dbid) &
+                                       (ps.c.srvid == c.srvid))
         return (select(columns)
                 .select_from(from_clause)
                 .where(c.datname == bindparam("database"))
